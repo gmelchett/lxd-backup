@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/csv"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -21,6 +22,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+var verbose bool
+
 type runningState int
 
 const (
@@ -30,13 +33,14 @@ const (
 
 type containerState struct {
 	name    string
+	host    string
 	state   runningState
 	profile string
 }
 
-func lxcList(host string) []containerState {
+func execLxc(args []string) string {
 
-	cmd := exec.Command("lxc", "list", "-c", "nsLP", "-f", "csv")
+	cmd := exec.Command("lxc", args...)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
@@ -44,14 +48,14 @@ func lxcList(host string) []containerState {
 		log.Fatalf("Failed to get stdout of 'lxc list'. Error: %v\n", err)
 	}
 
-	var csvResult strings.Builder
+	var s strings.Builder
 
 	reader := bufio.NewReader(stdout)
 
 	go func(reader io.Reader) {
 		scanner := bufio.NewScanner(reader)
 		for scanner.Scan() {
-			csvResult.WriteString(scanner.Text() + "\n")
+			s.WriteString(scanner.Text() + "\n")
 		}
 	}(reader)
 
@@ -60,7 +64,15 @@ func lxcList(host string) []containerState {
 	}
 	cmd.Wait()
 
-	r := csv.NewReader(strings.NewReader(csvResult.String()))
+	return s.String()
+
+}
+
+func lxcList() []*containerState {
+
+	stdout := execLxc([]string{"list", "-c", "nsLP", "-f", "csv"})
+
+	r := csv.NewReader(strings.NewReader(stdout))
 
 	containersCsv, err := r.ReadAll()
 
@@ -68,29 +80,35 @@ func lxcList(host string) []containerState {
 		log.Fatalf("Failed to convert raw CSV to [][]string. Error: %v\n", err)
 	}
 
-	containers := make([]containerState, 0, len(containersCsv))
+	containers := make([]*containerState, 0, len(containersCsv))
 
 	for i := range containersCsv {
 
-		if containersCsv[i][2] == host || len(host) == 0 {
-			var s runningState
+		var s runningState
 
-			switch containersCsv[i][1] {
-			case "STOPPED":
-				s = stateStopped
-			case "RUNNING":
-				s = stateRunning
-			default:
-				log.Fatalf("Unknown state for %s - %s - Giving up.\n", containersCsv[i][0], containersCsv[i][1])
-			}
-			containers = append(containers, containerState{name: containersCsv[i][0], state: s, profile: containersCsv[i][3]})
+		switch containersCsv[i][1] {
+		case "STOPPED":
+			s = stateStopped
+		case "RUNNING":
+			s = stateRunning
+		default:
+			log.Fatalf("Unknown state for %s - %s - Giving up.\n", containersCsv[i][0], containersCsv[i][1])
 		}
+		containers = append(containers, &containerState{
+			name:    containersCsv[i][0],
+			state:   s,
+			profile: containersCsv[i][3],
+			host:    containersCsv[i][2],
+		})
 	}
 
 	return containers
 }
 
 func lxcStop(name string) {
+	if verbose {
+		fmt.Printf("Stopping %s\n", name)
+	}
 	cmd := exec.Command("lxc", "stop", name)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -99,6 +117,10 @@ func lxcStop(name string) {
 }
 
 func lxcStart(name string) {
+	if verbose {
+		fmt.Printf("Restarting %s\n", name)
+	}
+
 	cmd := exec.Command("lxc", "start", name)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -107,14 +129,26 @@ func lxcStart(name string) {
 }
 
 func lxcExport(name, to string) {
+	if verbose {
+		fmt.Printf("Exporting %s..\n", name)
+	}
+
 	cmd := exec.Command("lxc", "export", name, to, "--instance-only", "-q", "--compression", "zstd")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("Failed to run: lxc export %s %s --instance-only. Error: %v\n", name, to, err)
 	}
+	if verbose {
+		fmt.Printf("Exported %s\n", name)
+	}
+
 }
 
 func fetchFileDataFromTar(fname string) map[string]string {
+
+	if verbose {
+		fmt.Println("Calculating MD5Sums..")
+	}
 
 	f, err := os.Open(fname)
 
@@ -159,6 +193,9 @@ func fetchFileDataFromTar(fname string) map[string]string {
 		}
 		fd[hdr.Name] = s.String()
 	}
+	if verbose {
+		fmt.Printf("Calculated MD5Sums for %d files.\n", len(fd))
+	}
 
 	return fd
 }
@@ -168,6 +205,10 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 	if _, err := os.Stat(dest); err == nil {
 		// Do nothing, if destination exists
 		return
+	}
+
+	if verbose {
+		fmt.Printf("Creating delta backup containing %d file(s).\n", len(filesChanged))
 	}
 
 	fin, err := os.Open(src)
@@ -216,8 +257,8 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 				log.Fatalf("Failed to write tar header: %v\n", err)
 			}
 			d := make([]byte, hdr.Size)
-			if n, err := tarreader.Read(d); err != nil {
-				log.Fatalf("Failed to read file in tar: %v\n", err)
+			if n, err := tarreader.Read(d); err != nil && int64(n) != hdr.Size {
+				log.Fatalf("Failed to read %s from tar: %v (%d bytes of %d)\n", hdr.Name, err, n, hdr.Size)
 			} else if n != len(d) {
 				log.Fatalf("tar Input truncated! Wanted %d bytes got %d\n", len(d), n)
 			}
@@ -284,27 +325,111 @@ func loadFileData(fname string) map[string]string {
 	return checksums
 }
 
+func filterHost(containers []*containerState, hosts map[string]bool, inc bool) []*containerState {
+
+	if len(hosts) == 0 {
+		return containers
+	}
+
+	ctmp := make([]*containerState, 0, len(containers))
+
+	for i := range containers {
+		if _, present := hosts[containers[i].host]; present == inc {
+			ctmp = append(ctmp, containers[i])
+		}
+	}
+	return ctmp
+}
+
+func filterCont(containers []*containerState, names map[string]bool, inc bool) []*containerState {
+
+	if len(names) == 0 {
+		return containers
+	}
+
+	ctmp := make([]*containerState, 0, len(containers))
+
+	for i := range containers {
+		if _, present := names[containers[i].name]; present == inc {
+			ctmp = append(ctmp, containers[i])
+		}
+	}
+	return ctmp
+}
+
 func main() {
 
-	backupTarget := ""
+	if _, err := exec.LookPath("lxd"); err != nil {
+		fmt.Println("The lxd binary is missing.")
+		os.Exit(1)
+	}
+
+	if _, err := exec.LookPath("zstd"); err != nil {
+		fmt.Println("You have to install zstd to run lxd-backup.")
+		os.Exit(1)
+	}
+
+	var backupTarget string
+	var contExcStr, contIncStr string
+	var hostExcStr, hostIncStr string
+
+	flag.BoolVar(&verbose, "v", false, "Enable verbose printing.")
+	flag.StringVar(&backupTarget, "b", "", "Backup output directory.")
+	flag.StringVar(&contExcStr, "ec", "", "Containers to exclude from backup. Comma separated.")
+	flag.StringVar(&contIncStr, "ic", "", "Containers to include in backup. Comma separated.")
+	flag.StringVar(&hostExcStr, "eh", "", "Hosts to exclude from backup. Comma separated.")
+	flag.StringVar(&hostIncStr, "ih", "", "Hosts to include in backup. Comma separated.")
+
+	flag.Parse()
+
+	if len(contExcStr) > 0 && len(contIncStr) > 0 {
+		log.Fatal("You can only include or exclude containers. Not include and exclude.")
+	}
+
+	if len(hostExcStr) > 0 && len(hostIncStr) > 0 {
+		log.Fatal("You can only include or exclude hosts. Not include and exclude.")
+	}
 
 	lxdBackupPrefix := filepath.Join(backupTarget, "lxd-backup-")
+
+	if len(backupTarget) > 0 {
+		if err := os.MkdirAll(backupTarget, 0755); err != nil && !os.IsExist(err) {
+			log.Fatalf("Failed to create backup output directory: %v\n", err)
+		}
+	}
+
+	toMap := func(s string) map[string]bool {
+		m := make(map[string]bool)
+		for _, v := range strings.Split(s, ",") {
+			if len(v) > 0 {
+				m[v] = true
+			}
+		}
+		return m
+	}
+
+	hostExc := toMap(hostExcStr)
+	hostInc := toMap(hostIncStr)
+	contExc := toMap(contExcStr)
+	contInc := toMap(contIncStr)
 
 	now := time.Now()
 	_, w := now.ISOWeek()
 
-	quarter := fmt.Sprintf("Q%d%d.tar.zst", now.Year(), now.Month()/4) // Lasts "forever"
-	monthDelta := fmt.Sprintf("M%d-delta.tar.zst", now.Month())        // Last a year
-	weekDelta := fmt.Sprintf("WN%d-delta.tar.zst", w%4)                // Lasts a month
-	dayDelta := fmt.Sprintf("WD%d-delta.tar.zst", now.Weekday())       // Last a week, 0 = Sunday
+	quarter := fmt.Sprintf("-Q%d%d.tar.zst", now.Year(), now.Month()/4) // Lasts "forever"
+	monthDelta := fmt.Sprintf("-M%d-delta.tar.zst", now.Month())        // Last a year
+	weekDelta := fmt.Sprintf("-WN%d-delta.tar.zst", w%4)                // Lasts a month
+	dayDelta := fmt.Sprintf("-WD%d-delta.tar.zst", now.Weekday())       // Last a week, 0 = Sunday
 
-	for _, c := range lxcList("") {
+	containers := lxcList()
 
-		if c.name != "backup-test" {
-			continue
-		}
+	containers = filterHost(containers, hostExc, false)
+	containers = filterHost(containers, hostInc, true)
 
-		fmt.Println(c)
+	containers = filterCont(containers, contExc, false)
+	containers = filterCont(containers, contInc, true)
+
+	for _, c := range containers {
 
 		if c.state == stateRunning {
 			lxcStop(c.name)
@@ -373,14 +498,18 @@ func main() {
 		os.Remove(lxdBackupPrefix + c.name + dayDelta)
 
 		// FIXME: There is no delta of delta, month, week and day will sometimes contain the same data
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, monthDelta)
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, weekDelta)
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, dayDelta)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+monthDelta)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+weekDelta)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+dayDelta)
 
 		status := fmt.Sprintf("%s: %d files changed/added, %d removed.\n", now.String(), len(filesChangedAdded), len(filesRemoved))
 		if err := ioutil.WriteFile(lxdBackupPrefix+c.name+".log", []byte(status), 0644); err != nil {
 			log.Fatalf("Failed to write log for %s: %v\n", c.name, err)
 		}
 		os.Remove(exportName)
+
+		if verbose {
+			fmt.Printf("Backed up %s.\n", c.name)
+		}
 	}
 }
