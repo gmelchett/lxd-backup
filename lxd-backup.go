@@ -32,10 +32,11 @@ const (
 )
 
 type containerState struct {
-	name    string
-	host    string
-	state   runningState
-	profile string
+	name        string
+	host        string
+	state       runningState
+	profile     string
+	profileName string
 }
 
 func execLxc(args []string) string {
@@ -65,7 +66,6 @@ func execLxc(args []string) string {
 	cmd.Wait()
 
 	return s.String()
-
 }
 
 func lxcList() []*containerState {
@@ -95,10 +95,11 @@ func lxcList() []*containerState {
 			log.Fatalf("Unknown state for %s - %s - Giving up.\n", containersCsv[i][0], containersCsv[i][1])
 		}
 		containers = append(containers, &containerState{
-			name:    containersCsv[i][0],
-			state:   s,
-			profile: containersCsv[i][3],
-			host:    containersCsv[i][2],
+			name:        containersCsv[i][0],
+			state:       s,
+			profileName: containersCsv[i][3],
+			host:        containersCsv[i][2],
+			profile:     execLxc([]string{"profile", "show"}),
 		})
 	}
 
@@ -141,7 +142,6 @@ func lxcExport(name, to string) {
 	if verbose {
 		fmt.Printf("Exported %s\n", name)
 	}
-
 }
 
 func fetchFileDataFromTar(fname string) map[string]string {
@@ -200,7 +200,7 @@ func fetchFileDataFromTar(fname string) map[string]string {
 	return fd
 }
 
-func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []string, dest string) {
+func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []string, dest, profileName, profileData string) {
 
 	if _, err := os.Stat(dest); err == nil {
 		// Do nothing, if destination exists
@@ -277,6 +277,11 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 	for i := range filesRemoved {
 		fr.WriteString(filesRemoved[i] + "\n")
 	}
+
+	if err := ioutil.WriteFile(dest+"."+profileName+".profile", []byte(profileData), 0644); err != nil {
+		log.Fatalf("Failed to write profile data to: %s: %v\n", dest+profileName+".profile", err)
+	}
+
 }
 
 func writeFileData(out string, fd map[string]string) {
@@ -498,9 +503,9 @@ func main() {
 		os.Remove(lxdBackupPrefix + c.name + dayDelta)
 
 		// FIXME: There is no delta of delta, month, week and day will sometimes contain the same data
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+monthDelta)
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+weekDelta)
-		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+dayDelta)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+monthDelta, c.profileName, c.profile)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+weekDelta, c.profileName, c.profile)
+		createDeltaBackup(exportName, filesChangedAdded, filesRemoved, lxdBackupPrefix+c.name+dayDelta, c.profileName, c.profile)
 
 		status := fmt.Sprintf("%s: %d files changed/added, %d removed.\n", now.String(), len(filesChangedAdded), len(filesRemoved))
 		if err := ioutil.WriteFile(lxdBackupPrefix+c.name+".log", []byte(status), 0644); err != nil {
@@ -509,7 +514,7 @@ func main() {
 		os.Remove(exportName)
 
 		if verbose {
-			fmt.Printf("Backed up %s.\n", c.name)
+			fmt.Printf("Backup of %s done.\n", c.name)
 		}
 	}
 }
