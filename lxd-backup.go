@@ -277,11 +277,13 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 	for i := range filesRemoved {
 		fr.WriteString(filesRemoved[i] + "\n")
 	}
+	writeProfile(dest, profileName, profileData)
+}
 
+func writeProfile(dest, profileName, profileData string) {
 	if err := ioutil.WriteFile(dest+"."+profileName+".profile", []byte(profileData), 0644); err != nil {
-		log.Fatalf("Failed to write profile data to: %s: %v\n", dest+profileName+".profile", err)
+		log.Fatalf("Failed to write profile data to: %s: %v\n", dest+"."+profileName+".profile", err)
 	}
-
 }
 
 func writeFileData(out string, fd map[string]string) {
@@ -462,6 +464,7 @@ func main() {
 		if !doDelta {
 			// Save md5sums for quarterly
 			writeFileData(exportName+".md5sum", sums)
+			writeProfile(exportName, c.profileName, c.profile)
 			continue
 		}
 
