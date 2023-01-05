@@ -257,10 +257,8 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 				log.Fatalf("Failed to write tar header: %v\n", err)
 			}
 			d := make([]byte, hdr.Size)
-			if n, err := tarreader.Read(d); err != nil && int64(n) != hdr.Size {
-				log.Fatalf("Failed to read %s from tar: %v (%d bytes of %d)\n", hdr.Name, err, n, hdr.Size)
-			} else if n != len(d) {
-				log.Fatalf("tar Input truncated! Wanted %d bytes got %d\n", len(d), n)
+			if d, err = io.ReadAll(tarreader); err != nil{
+				log.Fatalf("Failed to read %s from tar: %v (%d bytes of %d)\n", hdr.Name, err, len(d), hdr.Size)
 			}
 
 			if _, err := tarwriter.Write(d); err != nil {
