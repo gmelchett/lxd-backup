@@ -257,7 +257,7 @@ func createDeltaBackup(src string, filesChanged map[string]bool, filesRemoved []
 				log.Fatalf("Failed to write tar header: %v\n", err)
 			}
 			d := make([]byte, hdr.Size)
-			if d, err = io.ReadAll(tarreader); err != nil{
+			if d, err = io.ReadAll(tarreader); err != nil {
 				log.Fatalf("Failed to read %s from tar: %v (%d bytes of %d)\n", hdr.Name, err, len(d), hdr.Size)
 			}
 
@@ -374,12 +374,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	var backupTarget string
+	var backupTarget, tempDir string
 	var contExcStr, contIncStr string
 	var hostExcStr, hostIncStr string
 
 	flag.BoolVar(&verbose, "v", false, "Enable verbose printing.")
 	flag.StringVar(&backupTarget, "b", "", "Backup output directory.")
+	flag.StringVar(&tempDir, "t", "", "Temporary directory.")
 	flag.StringVar(&contExcStr, "ec", "", "Containers to exclude from backup. Comma separated.")
 	flag.StringVar(&contIncStr, "ic", "", "Containers to include in backup. Comma separated.")
 	flag.StringVar(&hostExcStr, "eh", "", "Hosts to exclude from backup. Comma separated.")
@@ -401,6 +402,16 @@ func main() {
 		if err := os.MkdirAll(backupTarget, 0755); err != nil && !os.IsExist(err) {
 			log.Fatalf("Failed to create backup output directory: %v\n", err)
 		}
+	}
+
+	if len(tempDir) > 0 {
+		if err := os.MkdirAll(tempDir, 0755); err != nil && !os.IsExist(err) {
+			log.Fatalf("Failed to create temporary output directory: %v\n", err)
+		}
+	}
+
+	if len(tempDir) == 0 && len(backupTarget) > 0 {
+		tempDir = backupTarget
 	}
 
 	toMap := func(s string) map[string]bool {
@@ -447,7 +458,7 @@ func main() {
 		if _, err := os.Stat(qBackup); errors.Is(err, os.ErrNotExist) {
 			exportName = qBackup
 		} else {
-			exportName = filepath.Join(backupTarget, fmt.Sprintf("lxd-temporary-backup-%d.tar.zstd", time.Now().UnixNano()))
+			exportName = filepath.Join(tempDir, fmt.Sprintf("lxd-temporary-backup-%d.tar.zstd", time.Now().UnixNano()))
 			doDelta = true
 		}
 
